@@ -1,0 +1,502 @@
+name: image-gallery-application
+
+services:
+
+  setup-certificates:
+    image: alpine/openssl:3.3.3
+    volumes:
+      - ./conf/cert:/opt/app/conf:ro
+      - gateway_certificate:/opt/app/gateway_certs
+      - jwt_authentication_keys:/opt/app/auth_keys
+      - jwt_authentication_pubkey:/opt/app/auth_pubkey
+    working_dir: /opt/app
+    restart: no
+    entrypoint: [ "sh", "conf/initCertificates.sh" ]
+    networks:
+      - app-net
+
+  gateway-service:
+    image: lubospodkidos/gallery-gateway-service:latest
+    depends_on:
+      setup-certificates:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_USER=${REDIS_USER}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    ports:
+      - "${GATEWAY_SERVICE_PORT}:8443"
+    volumes:
+      - gateway_certificate:/app/certs/gateway:ro
+      - jwt_authentication_pubkey:/app/certs/auth:ro
+    healthcheck:
+      test: >
+        wget --no-verbose --tries=1 
+        --spider --no-check-certificate
+        https://localhost:8443/actuator/health/liveness
+        || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - app-net
+      - redis-net
+
+  auth-service:
+    image: lubospodkidos/gallery-auth-service:latest
+    depends_on:
+      setup-certificates:
+        condition: service_completed_successfully
+      postgres-auth:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - USER_SERVICE_URL=${USER_SERVICE_URL}
+      - AUTHENTICATION_DB_URL=${AUTHENTICATION_DB_URL}
+      - AUTHENTICATION_DB_USER=${AUTHENTICATION_DB_USER}
+      - AUTHENTICATION_DB_PASSWORD=${AUTHENTICATION_DB_PASSWORD}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_USER=${REDIS_USER}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    ports:
+      - "${AUTH_SERVICE_PORT}:8080"
+    volumes:
+      - jwt_authentication_keys:/app/certs:ro
+    healthcheck:
+      test: >
+        wget --no-verbose --tries=1 --spider
+        http://localhost:8080/actuator/health/liveness
+        || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - app-net
+      - db-auth-net
+      - redis-net
+
+  user-service:
+    image: lubospodkidos/gallery-users-service:latest
+    depends_on:
+      postgres-users:
+        condition: service_healthy
+    environment:
+      - AUTHENTICATION_SERVICE_URL=${AUTHENTICATION_SERVICE_URL}
+      - USERS_DB_URL=${USERS_DB_URL}
+      - USERS_DB_USER=${USERS_DB_USER}
+      - USERS_DB_PASSWORD=${USERS_DB_PASSWORD}
+    ports:
+      - "${USERS_SERVICE_PORT}:8080"
+    healthcheck:
+      test: >
+        wget --no-verbose --tries=1 --spider
+        http://localhost:8080/actuator/health/liveness
+        || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - app-net
+      - db-user-net
+
+  image-service:
+    image: lubospodkidos/gallery-image-service:latest
+    depends_on:
+      postgres-images:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - COMMENT_SERVICE_URL=${COMMENT_SERVICE_URL}
+      - USER_SERVICE_URL=${USER_SERVICE_URL}
+      - IMAGES_DB_URL=${IMAGES_DB_URL}
+      - IMAGES_DB_USER=${IMAGES_DB_USER}
+      - IMAGES_DB_PASSWORD=${IMAGES_DB_PASSWORD}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_USER=${REDIS_USER}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - AWS_URL_ENDPOINT=${AWS_URL_ENDPOINT}
+      - AWS_ACCESS_KEY=${AWS_ACCESS_KEY}
+      - AWS_SECRET_KEY=${AWS_SECRET_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - KAFKA_BOOTSTRAP_SERVERS=kafka01:19092
+    ports:
+      - "${IMAGES_SERVICE_PORT}:8080"
+    healthcheck:
+      test: >
+        wget --no-verbose --tries=1 --spider
+        http://localhost:8080/actuator/health/liveness
+        || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - app-net
+      - db-images-net
+      - localstack-net
+      - kafka-net
+      - redis-net
+
+  comment-service:
+    image: lubospodkidos/gallery-comment-service:latest
+    depends_on:
+      postgres-comments:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - IMAGE_SERVICE_URL=${IMAGE_SERVICE_URL}
+      - USER_SERVICE_URL=${USER_SERVICE_URL}
+      - COMMENTS_DB_URL=${COMMENTS_DB_URL}
+      - COMMENTS_DB_USER=${COMMENTS_DB_USER}
+      - COMMENTS_DB_PASSWORD=${COMMENTS_DB_PASSWORD}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_USER=${REDIS_USER}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - KAFKA_BOOTSTRAP_SERVERS=kafka01:19092
+    ports:
+      - "${COMMENTS_SERVICE_PORT}:8080"
+    healthcheck:
+      test: >
+        wget --no-verbose --tries=1 --spider
+        http://localhost:8080/actuator/health/liveness
+        || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - app-net
+      - db-comments-net
+      - kafka-net
+      - redis-net
+
+  activity-service:
+    image: lubospodkidos/gallery-activity-service:latest
+    depends_on:
+      kafka01:
+        condition: service_healthy
+      mongo01:
+        condition: service_healthy
+    environment:
+      - BOOTSTRAP_SERVERS=kafka01:19092
+      - MONGO_SERVER=mongo01
+    healthcheck:
+      test: >
+        wget --no-verbose --tries=1 --spider
+        http://localhost:8080/actuator/health/liveness
+        || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - mongo-net
+      - kafka-net
+
+  gallery-front:
+    image: lubospodkidos/gallery-front:latest
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fI http://localhost:9090/ || exit 1" ]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    restart: unless-stopped
+    ports:
+      - "${GALLERY_APPLICATION_PORT}:9090"
+    networks:
+      - app-net
+
+  postgres-users:
+    image: postgres:18-alpine
+    container_name: postgres_user_db
+    environment:
+      POSTGRES_USER: ${USERS_DB_USER}
+      POSTGRES_PASSWORD: ${USERS_DB_PASSWORD}
+      POSTGRES_DB: users_db
+    ports:
+      - "${USERS_DB_PORT}:5432"
+    volumes:
+      - pgdata-user:/var/lib/postgresql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${USERS_DB_USER} -d users_db" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+      start_interval: 3s
+    restart: unless-stopped
+    networks:
+      - db-user-net
+
+  postgres-auth:
+    image: postgres:18-alpine
+    container_name: postgres_auth_db
+    environment:
+      POSTGRES_USER: ${AUTHENTICATION_DB_USER}
+      POSTGRES_PASSWORD: ${AUTHENTICATION_DB_PASSWORD}
+      POSTGRES_DB: auth_db
+    ports:
+      - "${AUTHENTICATION_DB_PORT}:5432"
+    volumes:
+      - pgdata-auth:/var/lib/postgresql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${AUTHENTICATION_DB_USER} -d auth_db" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+      start_interval: 3s
+    restart: unless-stopped
+    networks:
+      - db-auth-net
+
+  postgres-images:
+    image: postgres:18-alpine
+    container_name: postgres_image_db
+    environment:
+      POSTGRES_USER: ${IMAGES_DB_USER}
+      POSTGRES_PASSWORD: ${IMAGES_DB_PASSWORD}
+      POSTGRES_DB: images_db
+    ports:
+      - "${IMAGES_DB_PORT}:5432"
+    volumes:
+      - pgdata-images:/var/lib/postgresql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${IMAGES_DB_USER} -d images_db" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+      start_interval: 3s
+    restart: unless-stopped
+    networks:
+      - db-images-net
+
+  postgres-comments:
+    image: postgres:18-alpine
+    container_name: postgres_comment_db
+    environment:
+      POSTGRES_USER: ${COMMENTS_DB_USER}
+      POSTGRES_PASSWORD: ${COMMENTS_DB_PASSWORD}
+      POSTGRES_DB: comments_db
+    ports:
+      - "${COMMENTS_DB_PORT}:5432"
+    volumes:
+      - pgdata-comments:/var/lib/postgresql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${COMMENTS_DB_USER} -d comments_db" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+      start_interval: 3s
+    restart: unless-stopped
+    networks:
+      - db-comments-net
+
+  localstack:
+    image: gresau/localstack-persist
+    container_name: localstack
+    ports:
+      - "${LOCALSTACK_PORT}:4566"
+    environment:
+      - SERVICES=s3
+      - PERSIST_DEFAULT=0
+      - PERSIST_S3=1
+    volumes:
+      - "./conf/localstack:/etc/localstack/init/ready.d"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - localstack-data:/persisted-data
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:4566/_localstack/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - localstack-net
+
+  redis:
+    image: redis:8-alpine
+    container_name: redis
+    environment:
+      - REDIS_USER=${REDIS_USER}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_DEFAULT_PASSWORD=${REDIS_DEFAULT_PASSWORD}
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis_data:/data
+      - ./conf/redis:/app/redis:ro
+    entrypoint: [ "sh", "/app/redis/entrypoint.sh" ]
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+      start_interval: 3s
+    restart: unless-stopped
+    networks:
+      - redis-net
+
+  kafka01:
+    image: apache/kafka-native:4.0.0
+    container_name: kafka_broker_01
+    hostname: kafka01
+    ports:
+      - "${KAFKA_PORT}:9092"
+    environment:
+      # KRaft core settings
+      CLUSTER_ID: "gallery-kafka-cluster-1"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "controller,broker"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka01:9093"
+      # Listeners configuration
+      KAFKA_LISTENERS: "EXTERNAL://:9092,CONTROLLER://:9093,INTERNAL://:19092"
+      KAFKA_ADVERTISED_LISTENERS: "EXTERNAL://kafka01:9092,INTERNAL://kafka01:19092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      # Cluster settings
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Management
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: "/tmp/kafka-logs/data"
+    volumes:
+      - kafka-data:/tmp/kafka-logs
+    user: root
+    healthcheck:
+      test: [ "CMD-SHELL", "nc -z localhost 9092 || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - kafka-net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: kafka-ui
+    depends_on:
+      kafka01:
+        condition: service_healthy
+    ports:
+      - "${KAFKA_UI_PORT}:8080"
+    environment:
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    volumes:
+      - ./conf/kafka-ui/dynamic_config.yml:/etc/kafkaui/dynamic_config.yaml
+    healthcheck:
+      test: >
+        wget --no-verbose --tries=1 --spider
+        http://localhost:8080/actuator/health
+        || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - kafka-net
+
+  mongo01:
+    image: mongo:8.2
+    container_name: mongo01
+    ports:
+      - "${MONGO_PORT}:27017"
+    volumes:
+      - ./conf/mongo:/etc/mongo
+      - mongo-data:/data/db
+    command: [ "mongod","--config", "/etc/mongo/mongod.conf" ]
+    healthcheck:
+      test: [ "CMD-SHELL", "/etc/mongo/healthcheck.sh" ]
+      interval: 15s
+      timeout: 10s
+      start_period: 20s
+      start_interval: 2s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - mongo-net
+
+  setup-mongo:
+    image: mongo:8.2
+    depends_on:
+      mongo01:
+        condition: service_healthy
+    volumes:
+      - ./conf/mongo/mongo-replica-setup.sh:/scripts/mongo-replica-setup.sh:ro
+    entrypoint: [ "bash", "/scripts/mongo-replica-setup.sh" ]
+    restart: "no"
+    networks:
+      - mongo-net
+
+  mongo-express:
+    image: mongo-express:1.0.2
+    depends_on:
+      mongo01:
+        condition: service_healthy
+    ports:
+      - "${MONGO_EXPRESS_PORT}:8081"
+    environment:
+      ME_CONFIG_MONGODB_URL: "mongodb://mongo01:27017"
+    healthcheck:
+      test: >
+        wget --quiet --tries=1 --spider
+        http://127.0.0.1:8081/status
+        || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - mongo-net
+
+networks:
+  app-net:
+  db-user-net:
+  db-auth-net:
+  db-images-net:
+  db-comments-net:
+  redis-net:
+  localstack-net:
+  kafka-net:
+  mongo-net:
+
+volumes:
+  gateway_certificate:
+  jwt_authentication_keys:
+  jwt_authentication_pubkey:
+  pgdata-user:
+  pgdata-auth:
+  pgdata-images:
+  pgdata-comments:
+  redis_data:
+  localstack-data:
+  kafka-data:
+  mongo-data:
